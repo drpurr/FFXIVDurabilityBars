@@ -17,21 +17,21 @@ local ffxivDuraOptions = {
 					type = "toggle",
 					name = "Show Durability Free Bars",
 					desc = "Should durability bars be shown for items without durability? (eg. trinkets, cloak...)",
-					set = function(info, input) addon.db.profile.showDurabilityFreeBars = input end,
+					set = function(info, input) addon.db.profile.showDurabilityFreeBars = input; addon:RefreshAllSlots() end,
 					get = function(info) return addon.db.profile.showDurabilityFreeBars end,
 				},
 				useQualityColours = {
 					type = "toggle",
 					name = "Use Quality Colours",
 					desc = "Should durability bars use the quality/rarity colour of the items?",
-					set = function(info, input) addon.db.profile.useQualityColours = input end,
+					set = function(info, input) addon.db.profile.useQualityColours = input; addon:RefreshAllSlots() end,
 					get = function(info) return addon.db.profile.useQualityColours end,
 				},
 				useGreenWhenDamaged = {
 					type = "toggle",
 					name = "Use Green When Damaged",
 					desc = "Should durability bars use green instead of another colour when damaged?",
-					set = function(info, input) addon.db.profile.useGreenWhenDamaged = input end,
+					set = function(info, input) addon.db.profile.useGreenWhenDamaged = input; addon:RefreshAllSlots() end,
 					get = function(info) return addon.db.profile.useGreenWhenDamaged end,
 				},
 			},
@@ -84,12 +84,10 @@ function addon:AddDurabilityBarToSlot(button, side)
 	end
 
 	if button:GetID() >= INVSLOT_FIRST_EQUIPPED and button:GetID() <= INVSLOT_LAST_EQUIPPED then
-		local item = Item:CreateFromEquipmentSlot(button:GetID())
-		if (item:GetItemID()) then
+		if GetInventoryItemID("player", button:GetID()) then
 			local colour
 			local r, g, b
 			if (addon.db.profile.useQualityColours) then
-				GetInventoryItemQuality("player", button:GetID())
 				colour = GetInventoryItemQuality("player", button:GetID()) -- Using this over GetItemInfo(item:GetItemID()) because of upgradable items - they return their base rarity rather than the one equipped
 				if (colour) then
 					r, g, b = C_Item.GetItemQualityColor(colour)
@@ -130,25 +128,51 @@ function addon:AddDurabilityBarToSlot(button, side)
 	end
 end
 
+addon.slotButtons = {}
+
+function addon:UpdateSlot(button)
+	local id = button:GetID()
+	local side = "left" -- Default to a bar on the left, this should only end up on right side items
+	if id == INVSLOT_MAINHAND or -- Weapons have a bar above them
+		id == INVSLOT_OFFHAND or
+		id == INVSLOT_RANGED then
+			side = "top"
+	elseif id == INVSLOT_HEAD or -- Left side items have a bar on the right
+		id == INVSLOT_NECK or
+		id == INVSLOT_SHOULDER or
+		id == INVSLOT_BACK or
+		id == INVSLOT_CHEST or
+		id == INVSLOT_BODY or
+		id == INVSLOT_TABARD or
+		id == INVSLOT_WRIST then
+			side = "right"
+	end
+	addon:AddDurabilityBarToSlot(button, side)
+end
+
+function addon:RefreshAllSlots()
+	for button in pairs(addon.slotButtons) do
+		addon:UpdateSlot(button)
+	end
+end
+
 hooksecurefunc("PaperDollItemSlotButton_Update",
 	function(button)
-		local side = "left" -- Default to a bar on the left, this should only end up on right side items
-		if button:GetID() == INVSLOT_MAINHAND or -- Weapons have a bar above them
-			button:GetID() == INVSLOT_OFFHAND or
-			button:GetID() == INVSLOT_RANGED then
-				side = "top"
-		elseif button:GetID() == INVSLOT_HEAD or -- Left side items have a bar on the right
-			button:GetID() == INVSLOT_NECK or
-			button:GetID() == INVSLOT_SHOULDER or
-			button:GetID() == INVSLOT_BACK or
-			button:GetID() == INVSLOT_CHEST or
-			button:GetID() == INVSLOT_BODY or
-			button:GetID() == INVSLOT_TABARD or
-			button:GetID() == INVSLOT_WRIST then
-				side = "right"
-		end
-		addon:AddDurabilityBarToSlot(button, side)
+		addon.slotButtons[button] = true
+		addon:UpdateSlot(button)
 	end)
+
+-- Blizzard only redraws slot buttons on durability *threshold* alerts, so
+-- refresh our bars on every durability change while they're visible.
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("UPDATE_INVENTORY_DURABILITY")
+eventFrame:SetScript("OnEvent", function()
+	for button in pairs(addon.slotButtons) do
+		if button:IsVisible() then
+			addon:UpdateSlot(button)
+		end
+	end
+end)
 
 function addon:AddDurabilityPercentToTooltip(tooltip, data)
 	-- Retail durability percentages.
@@ -186,16 +210,27 @@ function addon:AddDurabilityPercentToTooltipClassic(tooltip)
 	end
 end
 
+-- Build a Lua pattern from the client's localized durability string
+-- (enUS: "Durability %d / %d") so this works on every locale and only
+-- matches the real durability line.
+local function BuildDurabilityPattern()
+	local template = DURABILITY_TEMPLATE or "Durability %d / %d"
+	local pattern = template:gsub("%p", "%%%0")         -- escape all punctuation
+	pattern = pattern:gsub("%%%%%d%%%$d", "(%%d+)")     -- positional "%1$d"
+	pattern = pattern:gsub("%%%%d", "(%%d+)")           -- plain "%d"
+	return "^" .. pattern .. "$"
+end
+local DURABILITY_PATTERN = BuildDurabilityPattern()
+
 function addon:AppendDurabilityPercentString(text)
 	-- Append the percentage to a durability line
-	if text and not issecretvalue(text) and string.len(text) > 10 and (string.sub(text,1,string.len("Durability")) == "Durability") then
-		local duraString = string.sub(text,string.len("Durability ") + 1)
-		local duraNums = {}
-		for str in string.gmatch(duraString,"%d+") do
-			table.insert(duraNums, tonumber(str))
-		end
-		local duraPercent = duraNums[1] / duraNums[2] * 100
-		return text .. " (" .. string.format("%.1f", duraPercent) .. "%)"
+	if not text or issecretvalue(text) then
+		return text
+	end
+	local cur, max = string.match(text, DURABILITY_PATTERN)
+	cur, max = tonumber(cur), tonumber(max)
+	if cur and max and max > 0 then
+		return text .. " (" .. string.format("%.1f", cur / max * 100) .. "%)"
 	end
 	return text
 end
