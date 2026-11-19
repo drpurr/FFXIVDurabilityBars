@@ -247,4 +247,4 @@ function addon:OnInitialize()
 	elseif GameTooltip.HookScript then
 		GameTooltip:HookScript("OnTooltipSetItem", function(tooltip) addon:AddDurabilityPercentToTooltipClassic(tooltip) end)
 	end
-end
+end
